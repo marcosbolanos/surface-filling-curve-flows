@@ -45,6 +45,7 @@
 #include "modules/get_tangent_basis.h"
 #include "modules/write_curve.h"
 #include "modules/curve_to_arclength.h"
+#include "modules/curve_curvature.h"
 #include "modules/cut_mesh_with_curve.h"
 #include "modules/gc_igl_convert.h"
 
@@ -355,11 +356,16 @@ void doWork() {
     // std::tie(segmentSurfacePoints, segmentLengths) = modules::connect_surface_points(*mesh, *geometry, nodes, segments);
   }
 
+  auto updatedCartesianCoords = modules::surface_point_to_cartesian(*mesh, *geometry, nodes);
+  auto curvatureData = modules::curve_curvature(updatedCartesianCoords, segments);
+  double maxCurvature = curvatureData.maxCurvature;
+
   auto end = std::chrono::high_resolution_clock::now();
 
   int time = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
   std::cout << "total time: " << time << "ms" << std::endl;
+  std::cout << "max curvature: " << maxCurvature << std::endl;
   std::cout << "===== iteration end =====" << std::endl << std::endl;
 
   // visualize
@@ -531,8 +537,8 @@ void doWork() {
       double l2 = _d.lpNorm<2>();
       double linf = _d.lpNorm<Eigen::Infinity>();
 
-      // iteration, time, numNodes, f, descent norm (L2), descent norm (L1), descent norm (L∞)
-      data_out << iteration << ", " << time << ", " << nodes.size() << ", " << f << ", " << l2 << ", " << l1 << ", " << linf << std::endl;
+      // iteration, time, numNodes, f, descent norm (L2), descent norm (L1), descent norm (L∞), max curvature
+      data_out << iteration << ", " << time << ", " << nodes.size() << ", " << f << ", " << l2 << ", " << l1 << ", " << linf << ", " << maxCurvature << std::endl;
     }
   }
 }
@@ -729,7 +735,7 @@ int main(int argc, char **argv) {
   std::string datafilename = "data.csv";
   data_out = std::ofstream(datafilename);
   std::cout << data_out.is_open() << ", " << datafilename << std::endl;
-  data_out << "iteration, time, numNodes, f, descent norm (L2), descent norm (L1), descent norm (L∞)" << std::endl;
+  data_out << "iteration, time, numNodes, f, descent norm (L2), descent norm (L1), descent norm (L∞), max curvature" << std::endl;
 
   if (nodes.size() == 0) {
     for (auto v : mesh->face(0).adjacentVertices()) {
@@ -878,6 +884,12 @@ int main(int argc, char **argv) {
   } else {
     polyscope::show();
   }
+
+  auto finalCartesianCoords = modules::surface_point_to_cartesian(*mesh, *geometry, nodes);
+  auto finalCurvature = modules::curve_curvature(finalCartesianCoords, segments);
+  std::cout << "final curvature stats -- mean: " << finalCurvature.meanCurvature
+            << ", max: " << finalCurvature.maxCurvature
+            << ", q75: " << finalCurvature.q75Curvature << std::endl;
 
   return EXIT_SUCCESS;
 }
