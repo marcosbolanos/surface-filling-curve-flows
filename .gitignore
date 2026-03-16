@@ -1,6 +1,7 @@
 # Build directories
 build/
 build_debug/
+.clangd/
 
 # local working directories
 dist/*

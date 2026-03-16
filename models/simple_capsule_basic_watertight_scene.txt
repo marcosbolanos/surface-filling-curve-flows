@@ -1,0 +1,4 @@
+mesh simple_capsule_basic_watertight.obj
+radius 0.1
+h 0.02
+excecute_only

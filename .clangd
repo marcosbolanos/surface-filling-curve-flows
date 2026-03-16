@@ -1,0 +1,5 @@
+CompileFlags:
+  Add:
+    - -isystem/home/linuxbrew/.linuxbrew/opt/gcc/include/c++/15
+    - -isystem/home/linuxbrew/.linuxbrew/opt/gcc/include/c++/15/x86_64-pc-linux-gnu
+    - -isystem/home/linuxbrew/.linuxbrew/opt/gcc/include/c++/15/backward
