@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/var/home/marcos/Code/surface-filling-curve-flows/build-libcxx/_deps/eigen-subbuild/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
