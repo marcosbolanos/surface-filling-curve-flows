@@ -3,6 +3,11 @@ build/
 build_debug/
 .clangd/
 
+# Outputs
+objs/
+radii/
+fixed_points/
+
 # local working directories
 dist/*
 
