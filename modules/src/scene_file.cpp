@@ -63,6 +63,14 @@ namespace modules {
       scene.w_fieldAlignedness = stod(parts[1]);
     } else if (key == "curxvature_aligned") {
       scene.w_curvatureAlignedness = stod(parts[1]);
+    } else if (key == "curvature_constraint") {
+      scene.curvatureConstraint = parts[1];
+    } else if (key == "curvature_barrier") {
+      scene.w_curvatureBarrier = stod(parts[1]);
+    } else if (key == "curvature_barrier_threshold") {
+      scene.curvatureBarrierThreshold = stod(parts[1]);
+    } else if (key == "curvature_barrier_epsilon") {
+      scene.curvatureBarrierEpsilon = stod(parts[1]);
     } else if (key == "bilaplacian") {
       scene.w_bilaplacian = stod(parts[1]);
     } else if (key == "varying_alpha") {

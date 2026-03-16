@@ -518,6 +518,18 @@ std::tuple<
     return (options.w_bilaplacian * l * d) / totalCurveLength;
   });
 
+  // ===== add curvature-constraint energy (scaffolding) =====
+  if (options.useCurvatureBarrier) {
+    func.add_elements<1>(TinyAD::range(numActiveNodes), [&](auto &element) -> TINYAD_SCALAR_TYPE(element) {
+      using T = TINYAD_SCALAR_TYPE(element);
+      (void)element;
+      (void)options.w_curvatureBarrier;
+      (void)options.curvatureBarrierThreshold;
+      (void)options.curvatureBarrierEpsilon;
+      return T(0.0);
+    });
+  }
+
   auto dirichletEnd = std::chrono::high_resolution_clock::now();
 
   // ===== add medial axis energy =====

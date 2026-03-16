@@ -18,6 +18,10 @@ struct Options {
   VertexData<Vector2> vectorField;
 
   double w_curvatureAlignedness = 0;
+  bool useCurvatureBarrier = false;
+  double w_curvatureBarrier = 0;
+  double curvatureBarrierThreshold = 0;
+  double curvatureBarrierEpsilon = 1e-6;
 
   double w_bilaplacian = 0;
 
