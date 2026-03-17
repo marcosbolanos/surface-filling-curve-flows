@@ -11,6 +11,8 @@
 #include <TinyAD/Utils/NewtonDirection.hh>
 #include <TinyAD/Utils/NewtonDecrement.hh>
 
+#include <cmath>
+
 #include <igl/octree.h>
 #include <igl/knn.h>
 #include <igl/PI.h>
@@ -154,7 +156,11 @@ std::tuple<
   assert(segmentsWith1ActiveNode.size() == activeOneSegment2SegmentIdx.size());
   assert(segmentsWith1ActiveNode.size() == activeOneSegmentSigns.size());
 
-  std::cout << "field alignedness: " << options.w_fieldAlignedness << ", curvature alignedness: " << options.w_curvatureAlignedness << ", bilaplacian weight: " << options.w_bilaplacian << std::endl;
+  std::cout << "field alignedness: " << options.w_fieldAlignedness
+            << ", curvature alignedness: " << options.w_curvatureAlignedness
+            << ", curvature barrier weight: " << options.w_curvatureBarrier
+            << ", k_max: " << options.curvatureBarrierThreshold
+            << ", bilaplacian weight: " << options.w_bilaplacian << std::endl;
 
   // ===== add field-aligned energy =====
   std::vector<Vector3> vectorFieldOnNode(nodes.size());
@@ -339,7 +345,7 @@ std::tuple<
   std::vector<std::array<Eigen::Vector3d, 3>> mappedPointsWith1ActiveNode = {};
   std::vector<std::array<double, 2>> mappedLengthsWith1ActiveNode = {};
 
-  if (options.w_bilaplacian > .0) {
+  if (options.w_bilaplacian > .0 || (options.useCurvatureBarrier && options.w_curvatureBarrier > .0)) {
     std::vector<std::vector<int>> node2Segment(nodes.size());
     for (int i = 0; i < segments.size(); i++) {
       for (int j = 0; j < 2; j++) {
@@ -518,15 +524,120 @@ std::tuple<
     return (options.w_bilaplacian * l * d) / totalCurveLength;
   });
 
-  // ===== add curvature-constraint energy (scaffolding) =====
-  if (options.useCurvatureBarrier) {
-    func.add_elements<1>(TinyAD::range(numActiveNodes), [&](auto &element) -> TINYAD_SCALAR_TYPE(element) {
+  // ===== add curvature-constraint barrier energy =====
+  // Reuse the same stencil builder as bilaplacian (vertexTriplets* arrays),
+  // so variable-handle patterns stay consistent with TinyAD.
+  if (options.useCurvatureBarrier && options.w_curvatureBarrier > 0.0) {
+    func.add_elements<3>(TinyAD::range(vertexTriplets.size()), [&](auto &element) -> TINYAD_SCALAR_TYPE(element) {
       using T = TINYAD_SCALAR_TYPE(element);
-      (void)element;
-      (void)options.w_curvatureBarrier;
-      (void)options.curvatureBarrierThreshold;
-      (void)options.curvatureBarrierEpsilon;
-      return T(0.0);
+      int e_id = element.handle;
+
+      int v0 = vertexTriplets[e_id][0];
+      int v1 = vertexTriplets[e_id][1];
+      int v2 = vertexTriplets[e_id][2];
+
+      Eigen::Vector3<T> x0 = element.variables(node2ActiveNodeIdx[v0]);
+      Eigen::Vector3<T> x1 = element.variables(node2ActiveNodeIdx[v1]);
+      Eigen::Vector3<T> x2 = element.variables(node2ActiveNodeIdx[v2]);
+
+      Eigen::Vector3<T> ePrev = x1 - x0;
+      Eigen::Vector3<T> eNext = x2 - x1;
+
+      T lPrev = ePrev.norm();
+      T lNext = eNext.norm();
+      Eigen::Vector3<T> tPrev = ePrev / lPrev;
+      Eigen::Vector3<T> tNext = eNext / lNext;
+
+      T tangentDot = tPrev.dot(tNext);
+      double lBar = 0.5 * (mappedLengths[e_id][0] + mappedLengths[e_id][1]);
+      double c = std::cos(options.curvatureBarrierThreshold * lBar);
+
+      T slack = tangentDot - T(c);
+      T eps = T(options.curvatureBarrierEpsilon);
+      double betaValue = std::max(options.curvatureBarrierEpsilon, 5e-2);
+      T beta = T(betaValue);
+      T z = slack / beta;
+      T absZ = sqrt(z * z + T(1e-12));
+      T softplusZ = log(T(1.0) + exp(-absZ)) + T(0.5) * (z + absZ);
+      T smoothPositiveSlack = beta * softplusZ + eps;
+
+      return -(options.w_curvatureBarrier * lBar / totalCurveLength) * log(smoothPositiveSlack);
+    });
+
+    func.add_elements<2>(TinyAD::range(vertexTripletsWith2ActiveNodes.size()), [&](auto &element) -> TINYAD_SCALAR_TYPE(element) {
+      using T = TINYAD_SCALAR_TYPE(element);
+      int e_id = element.handle;
+
+      int v0 = vertexTripletsWith2ActiveNodes[e_id][0];
+      int v1 = vertexTripletsWith2ActiveNodes[e_id][1];
+      int v2 = vertexTripletsWith2ActiveNodes[e_id][2];
+
+      Eigen::Vector3<T> x0 = isFixedNode[v0]
+        ? Eigen::Vector3<T>(cartesianCoords[v0].x, cartesianCoords[v0].y, cartesianCoords[v0].z)
+        : element.variables(node2ActiveNodeIdx[v0]);
+      Eigen::Vector3<T> x1 = element.variables(node2ActiveNodeIdx[v1]);
+      Eigen::Vector3<T> x2 = isFixedNode[v2]
+        ? Eigen::Vector3<T>(cartesianCoords[v2].x, cartesianCoords[v2].y, cartesianCoords[v2].z)
+        : element.variables(node2ActiveNodeIdx[v2]);
+
+      Eigen::Vector3<T> ePrev = x1 - x0;
+      Eigen::Vector3<T> eNext = x2 - x1;
+
+      T lPrev = ePrev.norm();
+      T lNext = eNext.norm();
+      Eigen::Vector3<T> tPrev = ePrev / lPrev;
+      Eigen::Vector3<T> tNext = eNext / lNext;
+
+      T tangentDot = tPrev.dot(tNext);
+      double lBar = 0.5 * (mappedLengthsWith2ActiveNodes[e_id][0] + mappedLengthsWith2ActiveNodes[e_id][1]);
+      double c = std::cos(options.curvatureBarrierThreshold * lBar);
+
+      T slack = tangentDot - T(c);
+      T eps = T(options.curvatureBarrierEpsilon);
+      double betaValue = std::max(options.curvatureBarrierEpsilon, 5e-2);
+      T beta = T(betaValue);
+      T z = slack / beta;
+      T absZ = sqrt(z * z + T(1e-12));
+      T softplusZ = log(T(1.0) + exp(-absZ)) + T(0.5) * (z + absZ);
+      T smoothPositiveSlack = beta * softplusZ + eps;
+
+      return -(options.w_curvatureBarrier * lBar / totalCurveLength) * log(smoothPositiveSlack);
+    });
+
+    func.add_elements<1>(TinyAD::range(vertexTripletsWith1ActiveNode.size()), [&](auto &element) -> TINYAD_SCALAR_TYPE(element) {
+      using T = TINYAD_SCALAR_TYPE(element);
+      int e_id = element.handle;
+
+      int v0 = vertexTripletsWith1ActiveNode[e_id][0];
+      int v1 = vertexTripletsWith1ActiveNode[e_id][1];
+      int v2 = vertexTripletsWith1ActiveNode[e_id][2];
+
+      Eigen::Vector3<T> x0(cartesianCoords[v0].x, cartesianCoords[v0].y, cartesianCoords[v0].z);
+      Eigen::Vector3<T> x1 = element.variables(node2ActiveNodeIdx[v1]);
+      Eigen::Vector3<T> x2(cartesianCoords[v2].x, cartesianCoords[v2].y, cartesianCoords[v2].z);
+
+      Eigen::Vector3<T> ePrev = x1 - x0;
+      Eigen::Vector3<T> eNext = x2 - x1;
+
+      T lPrev = ePrev.norm();
+      T lNext = eNext.norm();
+      Eigen::Vector3<T> tPrev = ePrev / lPrev;
+      Eigen::Vector3<T> tNext = eNext / lNext;
+
+      T tangentDot = tPrev.dot(tNext);
+      double lBar = 0.5 * (mappedLengthsWith1ActiveNode[e_id][0] + mappedLengthsWith1ActiveNode[e_id][1]);
+      double c = std::cos(options.curvatureBarrierThreshold * lBar);
+
+      T slack = tangentDot - T(c);
+      T eps = T(options.curvatureBarrierEpsilon);
+      double betaValue = std::max(options.curvatureBarrierEpsilon, 5e-2);
+      T beta = T(betaValue);
+      T z = slack / beta;
+      T absZ = sqrt(z * z + T(1e-12));
+      T softplusZ = log(T(1.0) + exp(-absZ)) + T(0.5) * (z + absZ);
+      T smoothPositiveSlack = beta * softplusZ + eps;
+
+      return -(options.w_curvatureBarrier * lBar / totalCurveLength) * log(smoothPositiveSlack);
     });
   }
 

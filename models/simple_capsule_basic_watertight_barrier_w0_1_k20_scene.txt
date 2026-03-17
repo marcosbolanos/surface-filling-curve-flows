@@ -1,0 +1,8 @@
+mesh simple_capsule_basic_watertight.obj
+radius 0.1
+h 0.02
+curvature_constraint barrier
+curvature_barrier 0.1
+curvature_barrier_threshold 20
+curvature_barrier_epsilon 1e-3
+excecute_only

@@ -32,7 +32,7 @@ namespace modules {
     double w_curvatureAlignedness = 0;
     std::string curvatureConstraint = "";
     double w_curvatureBarrier = 0;
-    double curvatureBarrierThreshold = 0;
+    double curvatureBarrierThreshold = 30;
     double curvatureBarrierEpsilon = 1e-6;
     double w_bilaplacian = 0;
     bool varyingAlpha = false;
