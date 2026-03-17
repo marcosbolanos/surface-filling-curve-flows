@@ -71,6 +71,8 @@ namespace modules {
       scene.curvatureBarrierThreshold = stod(parts[1]);
     } else if (key == "curvature_barrier_epsilon") {
       scene.curvatureBarrierEpsilon = stod(parts[1]);
+    } else if (key == "curvature_barrier_min_length") {
+      scene.curvatureBarrierMinLength = stod(parts[1]);
     } else if (key == "bilaplacian") {
       scene.w_bilaplacian = stod(parts[1]);
     } else if (key == "varying_alpha") {

@@ -46,6 +46,7 @@
 #include "modules/write_curve.h"
 #include "modules/curve_to_arclength.h"
 #include "modules/curve_curvature.h"
+#include "modules/curvature_barrier_threshold.h"
 #include "modules/cut_mesh_with_curve.h"
 #include "modules/gc_igl_convert.h"
 
@@ -89,6 +90,7 @@ int iteration = 0;
 bool writeCurve = false;
 bool writeData = false;
 bool runLoop = false;
+double adaptiveCurvatureBarrierKmax = -1.0;
 
 std::ofstream data_out;
 
@@ -326,6 +328,34 @@ void doWork() {
 
   auto cartesianCoords = modules::surface_point_to_cartesian(*mesh, *geometry, nodes);
 
+  double effectiveCurvatureBarrierKmax = scene.curvatureBarrierThreshold;
+  if (scene.curvatureConstraint == "barrier" && scene.w_curvatureBarrier > 0.0) {
+    auto threshold = modules::curvature_barrier_threshold(cartesianCoords, segments, segmentLengths, scene.curvatureBarrierMinLength);
+    double feasibleKmax = threshold.minFeasibleKmax;
+    double margin = std::max(scene.curvatureBarrierEpsilon, 1e-6);
+    double safetyBuffer = std::max(0.5, 5.0 * margin);
+    double requiredKmax = feasibleKmax + safetyBuffer;
+    double kmaxFloor = std::max(scene.curvatureBarrierThreshold, requiredKmax);
+
+    if (adaptiveCurvatureBarrierKmax < 0.0) {
+      adaptiveCurvatureBarrierKmax = std::max(0.8 * feasibleKmax, kmaxFloor);
+    }
+
+    double ramp = std::max(0.5, 0.1 * std::max(feasibleKmax, 1.0));
+    if (adaptiveCurvatureBarrierKmax < kmaxFloor) {
+      adaptiveCurvatureBarrierKmax = kmaxFloor;
+    } else if (adaptiveCurvatureBarrierKmax > kmaxFloor) {
+      adaptiveCurvatureBarrierKmax = std::max(kmaxFloor, adaptiveCurvatureBarrierKmax - ramp);
+    }
+
+    effectiveCurvatureBarrierKmax = adaptiveCurvatureBarrierKmax;
+
+    std::cout << "curvature barrier threshold info: feasible k_max >= " << feasibleKmax
+              << ", effective k_max = " << effectiveCurvatureBarrierKmax
+              << ", target k_max = " << scene.curvatureBarrierThreshold
+              << ", valid nodes = " << threshold.validNodeCount << std::endl;
+  }
+
   std::vector<Vector3> d, g;
   double f;
   std::vector<std::vector<Vector3>> medialAxis;
@@ -340,8 +370,9 @@ void doWork() {
       .w_curvatureAlignedness = scene.w_curvatureAlignedness,
       .useCurvatureBarrier = scene.curvatureConstraint == "barrier",
       .w_curvatureBarrier = scene.w_curvatureBarrier,
-      .curvatureBarrierThreshold = scene.curvatureBarrierThreshold,
+      .curvatureBarrierThreshold = effectiveCurvatureBarrierKmax,
       .curvatureBarrierEpsilon = scene.curvatureBarrierEpsilon,
+      .curvatureBarrierMinLength = scene.curvatureBarrierMinLength,
       .w_bilaplacian = scene.w_bilaplacian,
       .useAnisotropicAlphaOnMesh = scene.varyingAlpha,
       .alphaRatioOnMesh = smoothedFunction,

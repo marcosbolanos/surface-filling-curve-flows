@@ -34,6 +34,7 @@ namespace modules {
     double w_curvatureBarrier = 0;
     double curvatureBarrierThreshold = 30;
     double curvatureBarrierEpsilon = 1e-6;
+    double curvatureBarrierMinLength = 0;
     double w_bilaplacian = 0;
     bool varyingAlpha = false;
     bool useGeodesicMedialAxis = false;
