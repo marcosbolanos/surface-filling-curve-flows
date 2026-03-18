@@ -1,0 +1,17 @@
+mesh simple_capsule_basic_watertight.obj
+rmin_nm 5
+nm_per_unit 25
+h 0.1
+init_triangles 6
+init_ring_vertices 24
+init_stack_axis_mode long
+init_stack_rotate_deg 0
+init_stack_tilt_deg 0
+init_stack_ref 0 0 1
+init_ring_radius_nm 20
+init_ring_spacing_nm 4
+curvature_constraint barrier
+curvature_barrier 1.0
+curvature_barrier_epsilon 1e-6
+curvature_barrier_min_length 0.1
+excecute_only

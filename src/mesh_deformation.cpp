@@ -20,12 +20,22 @@
 #include <igl/circulation.h>
 #include <igl/harmonic.h>
 #include <igl/readDMAT.h>
+#include <igl/point_mesh_squared_distance.h>
+#include <igl/AABB.h>
+#include <igl/barycentric_coordinates.h>
+#include <Eigen/Eigenvalues>
 
 #include <tetgen-src/tetgen.h>
 // #include <igl/copyleft/cgal/delaunay_triangulation.h>
 
 #include <queue>
 #include <chrono>
+#include <cmath>
+#include <algorithm>
+#include <cctype>
+#include <numeric>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "args/args.hxx"
 #include "imgui.h"
@@ -43,6 +53,7 @@
 #include "modules/surface_filling_energy_geodesic.h"
 #include "modules/surface_path_evolution.h"
 #include "modules/get_tangent_basis.h"
+#include "modules/surface_point_tangent_basis.h"
 #include "modules/write_curve.h"
 #include "modules/curve_to_arclength.h"
 #include "modules/curve_curvature.h"
@@ -232,6 +243,421 @@ std::tuple<
   };
 }
 
+SurfacePoint project_to_surface_point(
+  ManifoldSurfaceMesh& _mesh,
+  VertexPositionGeometry& _geometry,
+  const Eigen::MatrixXd& V,
+  const Eigen::MatrixXi& F,
+  igl::AABB<Eigen::MatrixXd, 3>& tree,
+  const Vector3& query
+) {
+  Eigen::MatrixXd P(1, 3);
+  P << query.x, query.y, query.z;
+
+  Eigen::VectorXd sqrD;
+  Eigen::VectorXi I;
+  Eigen::MatrixXd C;
+  tree.squared_distance(V, F, P, sqrD, I, C);
+
+  int fid = I(0);
+  Eigen::MatrixXd A(1, 3), B(1, 3), D(1, 3);
+  A.row(0) = V.row(F(fid, 0));
+  B.row(0) = V.row(F(fid, 1));
+  D.row(0) = V.row(F(fid, 2));
+
+  Eigen::MatrixXd bary;
+  igl::barycentric_coordinates(C, A, B, D, bary);
+
+  Eigen::Vector3d bcoord = bary.row(0).transpose();
+  for (int i = 0; i < 3; i++) {
+    bcoord(i) = std::max(0.0, bcoord(i));
+  }
+  double sum = bcoord.sum();
+  if (sum < 1e-12) {
+    bcoord = Eigen::Vector3d(1.0, 0.0, 0.0);
+  } else {
+    bcoord /= sum;
+  }
+
+  Vector3 gcBary {bcoord(0), bcoord(1), bcoord(2)};
+  return SurfacePoint(_mesh.face(fid), gcBary);
+}
+
+void initialize_parallel_rings(
+  ManifoldSurfaceMesh& _mesh,
+  VertexPositionGeometry& _geometry,
+  const modules::SceneObject& _scene,
+  const double rminWorld,
+  std::vector<SurfacePoint>& _nodes,
+  std::vector<std::array<int, 2>>& _segments,
+  std::vector<bool>& _isFixedNode
+) {
+  int ringCount = std::max(1, _scene.initTriangleCount);
+  int ringVertices = std::max(3, _scene.initRingVertexCount);
+
+  double nmPerUnit = std::max(_scene.nanometersPerUnit, 1e-12);
+  double spacing = _scene.initRingSpacing;
+  if (_scene.initRingSpacingNm > 0.0) {
+    spacing = _scene.initRingSpacingNm / nmPerUnit;
+  }
+  if (spacing <= 0.0) {
+    spacing = std::max(rminWorld / 3.0, 1e-3);
+  }
+
+  double outerRadius = _scene.initRingRadius;
+  if (_scene.initRingRadiusNm > 0.0) {
+    outerRadius = _scene.initRingRadiusNm / nmPerUnit;
+  }
+  if (outerRadius <= 0.0) {
+    outerRadius = std::max(3.0 * rminWorld, (ringCount + 1.0) * spacing);
+  }
+
+  Eigen::MatrixXd V(_mesh.nVertices(), 3);
+  for (int i = 0; i < static_cast<int>(_mesh.nVertices()); i++) {
+    auto v = _mesh.vertex(i);
+    auto p = _geometry.vertexPositions[v];
+    V.row(i) << p.x, p.y, p.z;
+  }
+
+  Eigen::MatrixXi F(_mesh.nFaces(), 3);
+  for (int i = 0; i < static_cast<int>(_mesh.nFaces()); i++) {
+    auto f = _mesh.face(i);
+    int j = 0;
+    for (auto v : f.adjacentVertices()) {
+      F(i, j++) = v.getIndex();
+    }
+  }
+
+  igl::AABB<Eigen::MatrixXd, 3> tree;
+  tree.init(V, F);
+
+  Vector3 centroid {0.0, 0.0, 0.0};
+  int vCount = 0;
+  for (auto v : _mesh.vertices()) {
+    centroid += _geometry.vertexPositions[v];
+    vCount++;
+  }
+  centroid /= static_cast<double>(std::max(vCount, 1));
+
+  Eigen::Vector3d mean(centroid.x, centroid.y, centroid.z);
+  Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+  for (int i = 0; i < V.rows(); i++) {
+    Eigen::Vector3d d = V.row(i).transpose() - mean;
+    covariance += d * d.transpose();
+  }
+  covariance /= std::max(1, static_cast<int>(V.rows()));
+
+  std::string axisMode = _scene.initStackAxisMode;
+  std::transform(axisMode.begin(), axisMode.end(), axisMode.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+  int axisColumn = 2;
+  if (axisMode == "short" || axisMode == "lowest" || axisMode == "min" || axisMode == "smallest") {
+    axisColumn = 0;
+  } else if (axisMode == "mid" || axisMode == "middle" || axisMode == "median") {
+    axisColumn = 1;
+  }
+
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eig(covariance);
+  Eigen::Vector3d axisEig = eig.eigenvectors().col(axisColumn).normalized();
+  Vector3 axis {axisEig(0), axisEig(1), axisEig(2)};
+
+  Vector3 ref {_scene.initStackRefX, _scene.initStackRefY, _scene.initStackRefZ};
+  if (norm(ref) < 1e-8) {
+    ref = Vector3{0.0, 0.0, 1.0};
+  }
+  ref = unit(ref);
+  if (std::abs(dot(axis, ref)) > 0.95) {
+    ref = std::abs(dot(axis, Vector3{1.0, 0.0, 0.0})) < 0.95 ? Vector3{1.0, 0.0, 0.0} : Vector3{0.0, 1.0, 0.0};
+  }
+
+  Vector3 tangentX = unit(cross(ref, axis));
+  Vector3 tangentY = unit(cross(axis, tangentX));
+
+  double tilt = _scene.initStackTiltDeg * igl::PI / 180.0;
+  Vector3 stackAxis = unit(std::cos(tilt) * axis + std::sin(tilt) * tangentX);
+
+  Vector3 refAfterTilt = std::abs(dot(stackAxis, ref)) < 0.95 ? ref : tangentY;
+  Vector3 basisX = unit(cross(refAfterTilt, stackAxis));
+  Vector3 basisY = unit(cross(stackAxis, basisX));
+
+  double rotate = _scene.initStackRotateDeg * igl::PI / 180.0;
+  Vector3 rotatedX = std::cos(rotate) * basisX + std::sin(rotate) * basisY;
+  Vector3 rotatedY = -std::sin(rotate) * basisX + std::cos(rotate) * basisY;
+
+  double meshRadiusAroundAxis = 0.0;
+  for (auto v : _mesh.vertices()) {
+    Vector3 p = _geometry.vertexPositions[v];
+    Vector3 rel = p - centroid;
+    double along = dot(rel, stackAxis);
+    Vector3 radial = rel - along * stackAxis;
+    meshRadiusAroundAxis = std::max(meshRadiusAroundAxis, norm(radial));
+  }
+
+  double projectedRingRadius = outerRadius;
+  if (_scene.initRingRadius <= 0.0 && _scene.initRingRadiusNm <= 0.0) {
+    projectedRingRadius = std::max(meshRadiusAroundAxis * 1.1, spacing);
+  }
+
+  double offsetCenter = 0.5 * static_cast<double>(ringCount - 1);
+
+  for (int ring = 0; ring < ringCount; ring++) {
+    double ringOffset = (static_cast<double>(ring) - offsetCenter) * spacing;
+    Vector3 ringCenter = centroid + ringOffset * stackAxis;
+    int baseNode = _nodes.size();
+    double phase = (ring % 2 == 0) ? 0.0 : (igl::PI / static_cast<double>(ringVertices));
+
+    for (int k = 0; k < ringVertices; k++) {
+      double angle = phase + 2.0 * igl::PI * static_cast<double>(k) / static_cast<double>(ringVertices);
+      Vector3 dir = std::cos(angle) * rotatedX + std::sin(angle) * rotatedY;
+      Vector3 query = ringCenter + projectedRingRadius * dir;
+
+      SurfacePoint sp = project_to_surface_point(_mesh, _geometry, V, F, tree, query);
+      _nodes.emplace_back(sp);
+      _isFixedNode.emplace_back(false);
+    }
+
+    for (int k = 0; k < ringVertices; k++) {
+      _segments.emplace_back(std::array<int, 2> {baseNode + k, baseNode + (k + 1) % ringVertices});
+    }
+  }
+}
+
+int count_curve_components(
+  const size_t nodeCount,
+  const std::vector<std::array<int, 2>>& _segments
+) {
+  if (nodeCount == 0) {
+    return 0;
+  }
+
+  std::vector<int> parent(nodeCount);
+  std::iota(parent.begin(), parent.end(), 0);
+  std::vector<bool> active(nodeCount, false);
+
+  std::function<int(int)> findRoot = [&](int x) {
+    if (parent[x] != x) {
+      parent[x] = findRoot(parent[x]);
+    }
+    return parent[x];
+  };
+
+  auto unite = [&](int a, int b) {
+    int ra = findRoot(a);
+    int rb = findRoot(b);
+    if (ra != rb) {
+      parent[rb] = ra;
+    }
+  };
+
+  for (auto segment : _segments) {
+    int a = segment[0];
+    int b = segment[1];
+    if (a < 0 || b < 0 || a >= static_cast<int>(nodeCount) || b >= static_cast<int>(nodeCount)) {
+      continue;
+    }
+    active[a] = true;
+    active[b] = true;
+    unite(a, b);
+  }
+
+  std::unordered_set<int> roots;
+  for (int i = 0; i < static_cast<int>(nodeCount); i++) {
+    if (active[i]) {
+      roots.insert(findRoot(i));
+    }
+  }
+
+  return static_cast<int>(roots.size());
+}
+
+std::vector<std::vector<int>> curve_components(
+  const size_t nodeCount,
+  const std::vector<std::array<int, 2>>& _segments
+) {
+  if (nodeCount == 0) {
+    return {};
+  }
+
+  std::vector<int> parent(nodeCount);
+  std::iota(parent.begin(), parent.end(), 0);
+  std::vector<bool> active(nodeCount, false);
+
+  std::function<int(int)> findRoot = [&](int x) {
+    if (parent[x] != x) {
+      parent[x] = findRoot(parent[x]);
+    }
+    return parent[x];
+  };
+
+  auto unite = [&](int a, int b) {
+    int ra = findRoot(a);
+    int rb = findRoot(b);
+    if (ra != rb) {
+      parent[rb] = ra;
+    }
+  };
+
+  for (auto segment : _segments) {
+    int a = segment[0];
+    int b = segment[1];
+    if (a < 0 || b < 0 || a >= static_cast<int>(nodeCount) || b >= static_cast<int>(nodeCount)) {
+      continue;
+    }
+    active[a] = true;
+    active[b] = true;
+    unite(a, b);
+  }
+
+  std::unordered_map<int, int> rootToComp;
+  std::vector<std::vector<int>> components;
+  for (int i = 0; i < static_cast<int>(nodeCount); i++) {
+    if (!active[i]) {
+      continue;
+    }
+    int root = findRoot(i);
+    if (rootToComp.find(root) == rootToComp.end()) {
+      rootToComp[root] = components.size();
+      components.emplace_back(std::vector<int>{});
+    }
+    components[rootToComp[root]].emplace_back(i);
+  }
+
+  return components;
+}
+
+bool insert_dynamic_outer_ring(
+  ManifoldSurfaceMesh& _mesh,
+  VertexPositionGeometry& _geometry,
+  const modules::SceneObject& _scene,
+  const int _iteration,
+  std::vector<SurfacePoint>& _nodes,
+  std::vector<std::array<int, 2>>& _segments,
+  std::vector<std::vector<SurfacePoint>>& _segmentSurfacePoints,
+  std::vector<double>& _segmentLengths,
+  std::vector<bool>& _isFixedNode,
+  const double fallbackSpacing
+) {
+  if (!_scene.ringInsertionEnabled || _scene.ringInsertionMax <= 0 || _scene.ringInsertionEvery <= 0) {
+    return false;
+  }
+  if (_iteration <= _scene.ringInsertionAfterIter) {
+    return false;
+  }
+  if ((_iteration - _scene.ringInsertionAfterIter) % _scene.ringInsertionEvery != 0) {
+    return false;
+  }
+
+  auto components = curve_components(_nodes.size(), _segments);
+  int currentComponents = static_cast<int>(components.size());
+  if (currentComponents >= _scene.ringInsertionMax || _nodes.empty()) {
+    return false;
+  }
+
+  double nmPerUnit = std::max(_scene.nanometersPerUnit, 1e-12);
+  double insertionSpacing = _scene.ringInsertionSpacing;
+  if (_scene.ringInsertionSpacingNm > 0.0) {
+    insertionSpacing = _scene.ringInsertionSpacingNm / nmPerUnit;
+  }
+  if (insertionSpacing <= 0.0) {
+    insertionSpacing = std::max(fallbackSpacing, 1e-3);
+  }
+
+  int ringVertices = std::max(3, _scene.initRingVertexCount);
+
+  Eigen::MatrixXd V(_mesh.nVertices(), 3);
+  for (int i = 0; i < static_cast<int>(_mesh.nVertices()); i++) {
+    auto v = _mesh.vertex(i);
+    auto p = _geometry.vertexPositions[v];
+    V.row(i) << p.x, p.y, p.z;
+  }
+
+  Eigen::MatrixXi F(_mesh.nFaces(), 3);
+  for (int i = 0; i < static_cast<int>(_mesh.nFaces()); i++) {
+    auto f = _mesh.face(i);
+    int j = 0;
+    for (auto v : f.adjacentVertices()) {
+      F(i, j++) = v.getIndex();
+    }
+  }
+
+  igl::AABB<Eigen::MatrixXd, 3> tree;
+  tree.init(V, F);
+
+  auto cartesianNodes = modules::surface_point_to_cartesian(_mesh, _geometry, _nodes);
+  Vector3 centroid {0.0, 0.0, 0.0};
+  for (auto p : cartesianNodes) {
+    centroid += p;
+  }
+  centroid /= static_cast<double>(std::max(static_cast<int>(cartesianNodes.size()), 1));
+
+  SurfacePoint centerSp = project_to_surface_point(_mesh, _geometry, V, F, tree, centroid);
+  Vector3 center = modules::surface_point_to_cartesian(_mesh, _geometry, {centerSp})[0];
+  auto [basisX, basisY] = modules::surface_point_tangent_basis(_geometry, centerSp);
+
+  std::vector<double> radialDistance(_nodes.size(), 0.0);
+  double outerRadius = 0.0;
+  for (int i = 0; i < static_cast<int>(cartesianNodes.size()); i++) {
+    auto p = cartesianNodes[i];
+    Vector3 rel = p - center;
+    double x = dot(rel, basisX);
+    double y = dot(rel, basisY);
+    double r = std::sqrt(x * x + y * y);
+    radialDistance[i] = r;
+    outerRadius = std::max(outerRadius, r);
+  }
+
+  std::vector<double> componentRadii;
+  componentRadii.reserve(components.size());
+  for (const auto& comp : components) {
+    double meanRadius = 0.0;
+    for (int nodeId : comp) {
+      meanRadius += radialDistance[nodeId];
+    }
+    meanRadius /= static_cast<double>(std::max(static_cast<int>(comp.size()), 1));
+    componentRadii.emplace_back(meanRadius);
+  }
+  std::sort(componentRadii.begin(), componentRadii.end(), std::greater<double>());
+
+  double ringRadius = std::max(outerRadius + insertionSpacing, insertionSpacing);
+  if (componentRadii.size() >= 2) {
+    double largestGap = -1.0;
+    int gapIdx = -1;
+    for (int i = 0; i + 1 < static_cast<int>(componentRadii.size()); i++) {
+      double gap = componentRadii[i] - componentRadii[i + 1];
+      if (gap > largestGap) {
+        largestGap = gap;
+        gapIdx = i;
+      }
+    }
+    if (gapIdx >= 0 && largestGap > 1e-6) {
+      ringRadius = componentRadii[gapIdx + 1] + 0.5 * largestGap;
+    }
+  }
+  int baseNode = _nodes.size();
+  double phase = (currentComponents % 2 == 0) ? 0.0 : (igl::PI / static_cast<double>(ringVertices));
+
+  for (int k = 0; k < ringVertices; k++) {
+    double angle = phase + 2.0 * igl::PI * static_cast<double>(k) / static_cast<double>(ringVertices);
+    Vector3 dir = std::cos(angle) * basisX + std::sin(angle) * basisY;
+    Vector3 query = center + ringRadius * dir;
+    SurfacePoint sp = project_to_surface_point(_mesh, _geometry, V, F, tree, query);
+    _nodes.emplace_back(sp);
+    _isFixedNode.emplace_back(false);
+  }
+
+  for (int k = 0; k < ringVertices; k++) {
+    _segments.emplace_back(std::array<int, 2> {baseNode + k, baseNode + (k + 1) % ringVertices});
+  }
+
+  std::tie(_segmentSurfacePoints, _segmentLengths) = modules::connect_surface_points(_mesh, _geometry, _nodes, _segments);
+
+  std::cout << "inserted dynamic outer ring at iteration " << _iteration
+            << ": component count " << currentComponents << " -> " << (currentComponents + 1)
+            << ", radius " << ringRadius << std::endl;
+  return true;
+}
+
 std::tuple<
   Eigen::MatrixXd /* V */,
   Eigen::MatrixXi /* T */
@@ -313,6 +739,19 @@ std::tuple<
 void doWork() {
   iteration++;
 
+  insert_dynamic_outer_ring(
+    *mesh,
+    *geometry,
+    scene,
+    iteration,
+    nodes,
+    segments,
+    segmentSurfacePoints,
+    segmentLengths,
+    isFixedNode,
+    std::max(radius / 3.0, 1e-3)
+  );
+
   restNodes = nodes;
   restSegments = segments;
   restSegmentSurfacePoints = segmentSurfacePoints;
@@ -333,26 +772,28 @@ void doWork() {
     auto threshold = modules::curvature_barrier_threshold(cartesianCoords, segments, segmentLengths, scene.curvatureBarrierMinLength);
     double feasibleKmax = threshold.minFeasibleKmax;
     double margin = std::max(scene.curvatureBarrierEpsilon, 1e-6);
-    double safetyBuffer = std::max(0.5, 5.0 * margin);
-    double requiredKmax = feasibleKmax + safetyBuffer;
-    double kmaxFloor = std::max(scene.curvatureBarrierThreshold, requiredKmax);
+    double targetKmax = scene.curvatureBarrierThreshold;
+    double feasibleFloor = feasibleKmax + std::max(10.0 * margin, 1e-4);
 
     if (adaptiveCurvatureBarrierKmax < 0.0) {
-      adaptiveCurvatureBarrierKmax = std::max(0.8 * feasibleKmax, kmaxFloor);
+      double initOffset = std::max(0.05 * std::max(feasibleKmax, 1.0), 2.0 * margin);
+      adaptiveCurvatureBarrierKmax = std::max(targetKmax, feasibleKmax + initOffset);
     }
 
-    double ramp = std::max(0.5, 0.1 * std::max(feasibleKmax, 1.0));
-    if (adaptiveCurvatureBarrierKmax < kmaxFloor) {
-      adaptiveCurvatureBarrierKmax = kmaxFloor;
-    } else if (adaptiveCurvatureBarrierKmax > kmaxFloor) {
-      adaptiveCurvatureBarrierKmax = std::max(kmaxFloor, adaptiveCurvatureBarrierKmax - ramp);
+    double ramp = std::max(0.02 * adaptiveCurvatureBarrierKmax, 5.0 * margin);
+    if (adaptiveCurvatureBarrierKmax > targetKmax) {
+      adaptiveCurvatureBarrierKmax = std::max(targetKmax, adaptiveCurvatureBarrierKmax - ramp);
+    }
+
+    if (adaptiveCurvatureBarrierKmax < feasibleFloor) {
+      adaptiveCurvatureBarrierKmax = feasibleFloor;
     }
 
     effectiveCurvatureBarrierKmax = adaptiveCurvatureBarrierKmax;
 
     std::cout << "curvature barrier threshold info: feasible k_max >= " << feasibleKmax
               << ", effective k_max = " << effectiveCurvatureBarrierKmax
-              << ", target k_max = " << scene.curvatureBarrierThreshold
+              << ", target k_max = " << targetKmax
               << ", valid nodes = " << threshold.validNodeCount << std::endl;
   }
 
@@ -662,6 +1103,18 @@ int main(int argc, char **argv) {
   timestep = scene.timestep;
   rmax = scene.rmax == 0 ? radius * 10 : scene.rmax;
 
+  if (scene.rminNm > 0.0 && scene.nanometersPerUnit > 0.0) {
+    radius = scene.rminNm / scene.nanometersPerUnit;
+    if (scene.rmax == 0) {
+      rmax = radius * 10;
+    }
+    scene.curvatureBarrierThreshold = scene.nanometersPerUnit / scene.rminNm;
+
+    std::cout << "using physical Rmin: " << scene.rminNm << "nm, "
+              << scene.nanometersPerUnit << "nm/unit -> radius = " << radius
+              << ", target k_max = " << scene.curvatureBarrierThreshold << std::endl;
+  }
+
   if (scene.meshFileName == "") {
     std::cerr << "Please specify a mesh file in the scene file" << std::endl;
     return EXIT_FAILURE;
@@ -769,16 +1222,22 @@ int main(int argc, char **argv) {
   data_out << "iteration, time, numNodes, f, descent norm (L2), descent norm (L1), descent norm (L∞), max curvature" << std::endl;
 
   if (nodes.size() == 0) {
-    for (auto v : mesh->face(0).adjacentVertices()) {
-      std::cout << "initially added nodes: " << v << std::endl;
-      auto sp = SurfacePoint(v);
-      nodes.emplace_back(sp);
-      isFixedNode.emplace_back(false);
+    double rminWorld = radius;
+    if (scene.rminNm > 0.0 && scene.nanometersPerUnit > 0.0) {
+      rminWorld = scene.rminNm / scene.nanometersPerUnit;
     }
 
-    for (int i = 0; i < nodes.size(); i++) {
-      segments.emplace_back(std::array<int, 2>{i, int((i + 1) % nodes.size())});
-    }
+    initialize_parallel_rings(
+      *mesh,
+      *geometry,
+      scene,
+      rminWorld,
+      nodes,
+      segments,
+      isFixedNode
+    );
+
+    std::cout << "initialized " << scene.initTriangleCount << " parallel ring curve(s)" << std::endl;
   }
 
   // add boundary loops to fixed nodes

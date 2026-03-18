@@ -1,5 +1,7 @@
 #include "modules/scene_file.h"
 
+#include <algorithm>
+
 namespace modules {
   using namespace std;
 
@@ -73,8 +75,55 @@ namespace modules {
       scene.curvatureBarrierEpsilon = stod(parts[1]);
     } else if (key == "curvature_barrier_min_length") {
       scene.curvatureBarrierMinLength = stod(parts[1]);
+    } else if (key == "rmin_nm") {
+      scene.rminNm = stod(parts[1]);
+    } else if (key == "nm_per_unit" || key == "nanometers_per_unit") {
+      scene.nanometersPerUnit = stod(parts[1]);
     } else if (key == "bilaplacian") {
       scene.w_bilaplacian = stod(parts[1]);
+    } else if (key == "init_triangles") {
+      scene.initTriangleCount = std::max(1, std::stoi(parts[1]));
+    } else if (key == "init_ring_vertices") {
+      scene.initRingVertexCount = std::max(3, std::stoi(parts[1]));
+    } else if (key == "init_stack_axis_mode") {
+      scene.initStackAxisMode = parts[1];
+    } else if (key == "init_stack_axis") {
+      scene.initStackAxisMode = parts[1];
+      if (scene.initStackAxisMode == "highest") {
+        scene.initStackAxisMode = "long";
+      } else if (scene.initStackAxisMode == "lowest") {
+        scene.initStackAxisMode = "short";
+      } else if (scene.initStackAxisMode == "middle" || scene.initStackAxisMode == "median") {
+        scene.initStackAxisMode = "mid";
+      }
+    } else if (key == "init_stack_rotate_deg") {
+      scene.initStackRotateDeg = stod(parts[1]);
+    } else if (key == "init_stack_tilt_deg") {
+      scene.initStackTiltDeg = stod(parts[1]);
+    } else if (key == "init_stack_ref") {
+      scene.initStackRefX = stod(parts[1]);
+      scene.initStackRefY = stod(parts[2]);
+      scene.initStackRefZ = stod(parts[3]);
+    } else if (key == "init_ring_radius") {
+      scene.initRingRadius = stod(parts[1]);
+    } else if (key == "init_ring_spacing") {
+      scene.initRingSpacing = stod(parts[1]);
+    } else if (key == "init_ring_radius_nm") {
+      scene.initRingRadiusNm = stod(parts[1]);
+    } else if (key == "init_ring_spacing_nm") {
+      scene.initRingSpacingNm = stod(parts[1]);
+    } else if (key == "ring_insertion") {
+      scene.ringInsertionEnabled = true;
+    } else if (key == "ring_insertion_every") {
+      scene.ringInsertionEvery = std::max(1, std::stoi(parts[1]));
+    } else if (key == "ring_insertion_after_iter") {
+      scene.ringInsertionAfterIter = std::max(0, std::stoi(parts[1]));
+    } else if (key == "ring_insertion_max") {
+      scene.ringInsertionMax = std::max(0, std::stoi(parts[1]));
+    } else if (key == "ring_insertion_spacing") {
+      scene.ringInsertionSpacing = stod(parts[1]);
+    } else if (key == "ring_insertion_spacing_nm") {
+      scene.ringInsertionSpacingNm = stod(parts[1]);
     } else if (key == "varying_alpha") {
       scene.varyingAlpha = true;
     } else if (key == "geodesic_medial_axis") {
