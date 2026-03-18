@@ -1,5 +1,6 @@
 # Build directories
 build/
+build-libcxx/
 build_debug/
 .clangd/
 
