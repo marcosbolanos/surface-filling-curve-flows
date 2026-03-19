@@ -124,6 +124,8 @@ namespace modules {
       scene.ringInsertionSpacing = stod(parts[1]);
     } else if (key == "ring_insertion_spacing_nm") {
       scene.ringInsertionSpacingNm = stod(parts[1]);
+    } else if (key == "max_iterations") {
+      scene.maxIterations = std::max(1, std::stoi(parts[1]));
     } else if (key == "varying_alpha") {
       scene.varyingAlpha = true;
     } else if (key == "geodesic_medial_axis") {

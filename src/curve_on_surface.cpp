@@ -31,6 +31,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <numeric>
 #include <unordered_map>
 #include <unordered_set>
@@ -1053,7 +1054,12 @@ int main(int argc, char **argv) {
   }
 
   // Initialize polyscope
-  polyscope::init();
+  const char* polyscopeBackend = std::getenv("POLYSCOPE_BACKEND");
+  if (polyscopeBackend != nullptr && std::string(polyscopeBackend).size() > 0) {
+    polyscope::init(polyscopeBackend);
+  } else {
+    polyscope::init();
+  }
 
   // Set the callback function
   polyscope::state::userCallback = myCallback;
@@ -1329,7 +1335,7 @@ int main(int argc, char **argv) {
     writeData = true;
     writeCurve = true;
 
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < scene.maxIterations; i++) {
       doWork();
     }
   } else {

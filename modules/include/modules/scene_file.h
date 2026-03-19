@@ -58,6 +58,7 @@ namespace modules {
     double ringInsertionSpacingNm = 0;
     bool varyingAlpha = false;
     bool useGeodesicMedialAxis = false;
+    int maxIterations = 100;
     bool excecuteOnly = false;
   };
 
