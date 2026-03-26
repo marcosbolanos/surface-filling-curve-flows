@@ -32,6 +32,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
+#include <limits>
 #include <numeric>
 #include <unordered_map>
 #include <unordered_set>
@@ -93,8 +95,190 @@ bool writeCurve = false;
 bool writeData = false;
 bool runLoop = false;
 double adaptiveCurvatureBarrierKmax = -1.0;
+int stagedTriangleSeedsInserted = 0;
 
 std::ofstream data_out;
+
+bool uses_legacy_triangle_init(const modules::SceneObject& _scene) {
+  return _scene.initMode == "legacy_triangle";
+}
+
+bool uses_staged_triangle_init(const modules::SceneObject& _scene) {
+  return _scene.initMode == "staged_triangle";
+}
+
+SurfacePoint project_to_surface_point(
+  ManifoldSurfaceMesh& _mesh,
+  VertexPositionGeometry& _geometry,
+  const Eigen::MatrixXd& V,
+  const Eigen::MatrixXi& F,
+  igl::AABB<Eigen::MatrixXd, 3>& tree,
+  const Vector3& query
+);
+
+double point_segment_distance(const Vector3& p, const Vector3& a, const Vector3& b) {
+  Vector3 ab = b - a;
+  double ab2 = dot(ab, ab);
+  if (ab2 < 1e-12) {
+    return norm(p - a);
+  }
+
+  double t = dot(p - a, ab) / ab2;
+  t = std::max(0.0, std::min(1.0, t));
+  Vector3 q = a + t * ab;
+  return norm(p - q);
+}
+
+double min_distance_to_curve_samples(
+  const std::vector<Vector3>& samples,
+  const std::vector<Vector3>& curveCoords,
+  const std::vector<std::array<int, 2>>& curveSegments
+) {
+  if (curveCoords.empty() || curveSegments.empty()) {
+    return std::numeric_limits<double>::infinity();
+  }
+
+  double minDistance = std::numeric_limits<double>::infinity();
+  for (const auto& sample : samples) {
+    for (const auto& segment : curveSegments) {
+      int i0 = segment[0];
+      int i1 = segment[1];
+      if (i0 < 0 || i1 < 0 || i0 >= static_cast<int>(curveCoords.size()) ||
+          i1 >= static_cast<int>(curveCoords.size())) {
+        continue;
+      }
+      minDistance = std::min(
+        minDistance,
+        point_segment_distance(sample, curveCoords[i0], curveCoords[i1])
+      );
+    }
+  }
+  return minDistance;
+}
+
+void freeze_active_curve_nodes(std::vector<bool>& _isFixedNode) {
+  for (size_t i = 0; i < _isFixedNode.size(); i++) {
+    _isFixedNode[i] = true;
+  }
+}
+
+bool insert_triangle_seed_on_clear_face(
+  ManifoldSurfaceMesh& _mesh,
+  VertexPositionGeometry& _geometry,
+  const modules::SceneObject& _scene,
+  const double rminWorld,
+  std::vector<SurfacePoint>& _nodes,
+  std::vector<std::array<int, 2>>& _segments,
+  std::vector<bool>& _isFixedNode
+) {
+  std::vector<Vector3> curveCoords = modules::surface_point_to_cartesian(_mesh, _geometry, _nodes);
+
+  double nmPerUnit = std::max(_scene.nanometersPerUnit, 1e-12);
+  double seedRadius = std::max(std::max(0.8 * static_cast<double>(h), 1.25 * rminWorld), 1e-3);
+  double clearance = _scene.initStageClearance;
+  if (_scene.initStageClearanceNm > 0.0) {
+    clearance = _scene.initStageClearanceNm / nmPerUnit;
+  }
+  if (clearance <= 0.0) {
+    clearance = seedRadius + std::max(0.5 * static_cast<double>(h), 0.25 * rminWorld);
+  }
+
+  Eigen::MatrixXd V(_mesh.nVertices(), 3);
+  for (int i = 0; i < static_cast<int>(_mesh.nVertices()); i++) {
+    auto v = _mesh.vertex(i);
+    auto p = _geometry.vertexPositions[v];
+    V.row(i) << p.x, p.y, p.z;
+  }
+
+  Eigen::MatrixXi F(_mesh.nFaces(), 3);
+  for (int i = 0; i < static_cast<int>(_mesh.nFaces()); i++) {
+    auto f = _mesh.face(i);
+    int j = 0;
+    for (auto v : f.adjacentVertices()) {
+      F(i, j++) = v.getIndex();
+    }
+  }
+
+  igl::AABB<Eigen::MatrixXd, 3> tree;
+  tree.init(V, F);
+
+  Face bestFace;
+  double bestScore = -1.0;
+  bool foundFace = false;
+
+  for (auto f : _mesh.faces()) {
+    std::vector<Vertex> faceVertices;
+    std::vector<Vector3> vertexPositions;
+    Vector3 centroid{0.0, 0.0, 0.0};
+
+    for (auto v : f.adjacentVertices()) {
+      faceVertices.emplace_back(v);
+      Vector3 p = _geometry.vertexPositions[v];
+      vertexPositions.emplace_back(p);
+      centroid += p;
+    }
+
+    if (faceVertices.size() != 3) {
+      continue;
+    }
+
+    centroid /= 3.0;
+    std::vector<Vector3> samples = vertexPositions;
+    samples.emplace_back(centroid);
+    samples.emplace_back(0.5 * (vertexPositions[0] + vertexPositions[1]));
+    samples.emplace_back(0.5 * (vertexPositions[1] + vertexPositions[2]));
+    samples.emplace_back(0.5 * (vertexPositions[2] + vertexPositions[0]));
+
+    double distanceToCurve = min_distance_to_curve_samples(samples, curveCoords, _segments);
+    if (!_segments.empty() && distanceToCurve <= clearance) {
+      continue;
+    }
+
+    if (distanceToCurve > bestScore) {
+      bestScore = distanceToCurve;
+      bestFace = f;
+      foundFace = true;
+    }
+  }
+
+  if (!foundFace) {
+    return false;
+  }
+
+  Vector3 centroid{0.0, 0.0, 0.0};
+  for (auto v : bestFace.adjacentVertices()) {
+    centroid += _geometry.vertexPositions[v];
+  }
+  centroid /= 3.0;
+
+  SurfacePoint centerSp = project_to_surface_point(_mesh, _geometry, V, F, tree, centroid);
+  Vector3 center = modules::surface_point_to_cartesian(_mesh, _geometry, {centerSp})[0];
+  auto [basisX, basisY] = modules::surface_point_tangent_basis(_geometry, centerSp);
+
+  if (bestScore != std::numeric_limits<double>::infinity()) {
+    seedRadius = std::min(seedRadius, std::max(0.35 * bestScore, 0.5 * rminWorld));
+  }
+
+  int baseNode = _nodes.size();
+  for (int k = 0; k < 3; k++) {
+    double angle = 2.0 * igl::PI * static_cast<double>(k) / 3.0;
+    Vector3 dir = std::cos(angle) * basisX + std::sin(angle) * basisY;
+    Vector3 query = center + seedRadius * dir;
+    SurfacePoint sp = project_to_surface_point(_mesh, _geometry, V, F, tree, query);
+    _nodes.emplace_back(sp);
+    _isFixedNode.emplace_back(false);
+  }
+
+  for (int i = 0; i < 3; i++) {
+    _segments.emplace_back(std::array<int, 2>{baseNode + i, baseNode + ((i + 1) % 3)});
+  }
+
+  std::cout << "inserted staged triangle seed on face " << bestFace.getIndex()
+            << " with clearance " << bestScore
+            << " and seed radius " << seedRadius << std::endl;
+
+  return true;
+}
 
 std::tuple<
   std::vector<Vector3> /* nodes */,
@@ -730,6 +914,45 @@ std::tuple<
 void doWork() {
   iteration++;
 
+  if (
+    uses_staged_triangle_init(scene) &&
+    stagedTriangleSeedsInserted < std::max(1, scene.initTriangleCount) &&
+    scene.initStageIterations > 0 &&
+    iteration > 1 &&
+    ((iteration - 1) % scene.initStageIterations == 0)
+  ) {
+    if (scene.initFreezePreviousStages) {
+      freeze_active_curve_nodes(isFixedNode);
+    }
+
+    double rminWorld = radius;
+    if (scene.rminNm > 0.0 && scene.nanometersPerUnit > 0.0) {
+      rminWorld = scene.rminNm / scene.nanometersPerUnit;
+    }
+
+    if (
+      insert_triangle_seed_on_clear_face(
+        *mesh,
+        *geometry,
+        scene,
+        rminWorld,
+        nodes,
+        segments,
+        isFixedNode
+      )
+    ) {
+      stagedTriangleSeedsInserted++;
+      std::tie(segmentSurfacePoints, segmentLengths) =
+        modules::connect_surface_points(*mesh, *geometry, nodes, segments);
+      std::cout << "staged triangle initialization progress: "
+                << stagedTriangleSeedsInserted << "/" << scene.initTriangleCount
+                << " seeds inserted" << std::endl;
+    } else {
+      std::cout << "staged triangle initialization could not find a clear face for the next seed"
+                << std::endl;
+    }
+  }
+
   insert_dynamic_outer_ring(
     *mesh,
     *geometry,
@@ -1198,17 +1421,39 @@ int main(int argc, char **argv) {
       rminWorld = scene.rminNm / scene.nanometersPerUnit;
     }
 
-    initialize_parallel_rings(
-      *mesh,
-      *geometry,
-      scene,
-      rminWorld,
-      nodes,
-      segments,
-      isFixedNode
-    );
+    if (uses_legacy_triangle_init(scene) || uses_staged_triangle_init(scene)) {
+      if (
+        !insert_triangle_seed_on_clear_face(
+          *mesh,
+          *geometry,
+          scene,
+          rminWorld,
+          nodes,
+          segments,
+          isFixedNode
+        )
+      ) {
+        std::cerr << "failed to initialize triangle seed on a clear face" << std::endl;
+        return EXIT_FAILURE;
+      }
+      stagedTriangleSeedsInserted = 1;
+      std::cout << "initialized triangle seed 1/"
+                << (uses_staged_triangle_init(scene) ? scene.initTriangleCount : 1)
+                << std::endl;
+    } else {
+      initialize_parallel_rings(
+        *mesh,
+        *geometry,
+        scene,
+        rminWorld,
+        nodes,
+        segments,
+        isFixedNode
+      );
 
-    std::cout << "initialized " << scene.initTriangleCount << " parallel ring curve(s)" << std::endl;
+      std::cout << "initialized " << scene.initTriangleCount << " parallel ring curve(s)"
+                << std::endl;
+    }
   }
 
   // add boundary loops to fixed nodes
@@ -1248,6 +1493,9 @@ int main(int argc, char **argv) {
   initialSegmentSurfacePoints = segmentSurfacePoints;
   initialSegmentLengths = segmentLengths;
   isInitialFixedNode = isFixedNode;
+
+  std::filesystem::create_directories("./objs");
+  std::filesystem::create_directories("./radii");
 
   {
     // for (auto segment : initialSegments) {

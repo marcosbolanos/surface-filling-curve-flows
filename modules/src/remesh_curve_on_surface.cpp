@@ -91,7 +91,12 @@ std::tuple<
     int v0 = segments[i][0], v1 = segments[i][1];
 
     if (!deletingNodes[v0] && !deletingNodes[v1]) {
-      newSegments.emplace_back(std::array<int, 2>{node2NewNode[v0], node2NewNode[v1]});
+      int nv0 = node2NewNode[v0];
+      int nv1 = node2NewNode[v1];
+      if (nv0 == nv1) {
+        continue;
+      }
+      newSegments.emplace_back(std::array<int, 2>{nv0, nv1});
       newSegmentSurfacePoints.emplace_back(segmentSurfacePoints[i]);
       newSegmentLengths.emplace_back(segmentLengths[i]);
     } else if (!deletingNodes[v0] && deletingNodes[v1]) {
@@ -106,7 +111,12 @@ std::tuple<
         v = segments[currentSegment] [0] == v ? segments[currentSegment][1] : segments[currentSegment][0];
       }
 
-      newSegments.emplace_back(std::array<int, 2>{node2NewNode[v0], node2NewNode[v]});
+      int nv0 = node2NewNode[v0];
+      int nv1 = node2NewNode[v];
+      if (nv0 == nv1) {
+        continue;
+      }
+      newSegments.emplace_back(std::array<int, 2>{nv0, nv1});
 
       auto [path] = point_point_geodesic(mesh, geometry, mmp, nodes[v0], nodes[v]);
 

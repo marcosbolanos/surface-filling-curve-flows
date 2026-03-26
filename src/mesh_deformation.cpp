@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
 #include <numeric>
 #include <unordered_map>
 #include <unordered_set>
@@ -1279,6 +1280,9 @@ int main(int argc, char **argv) {
   initialSegmentSurfacePoints = segmentSurfacePoints;
   initialSegmentLengths = segmentLengths;
   isInitialFixedNode = isFixedNode;
+
+  std::filesystem::create_directories("./objs");
+  std::filesystem::create_directories("./radii");
 
   std::tie(V, F) = modules::gc_to_igl_vf(*mesh, *geometry);
 

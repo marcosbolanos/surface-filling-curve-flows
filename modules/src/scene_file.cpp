@@ -81,8 +81,16 @@ namespace modules {
       scene.nanometersPerUnit = stod(parts[1]);
     } else if (key == "bilaplacian") {
       scene.w_bilaplacian = stod(parts[1]);
+    } else if (key == "init_mode") {
+      scene.initMode = parts[1];
     } else if (key == "init_triangles") {
       scene.initTriangleCount = std::max(1, std::stoi(parts[1]));
+    } else if (key == "init_stage_iterations") {
+      scene.initStageIterations = std::max(1, std::stoi(parts[1]));
+    } else if (key == "init_freeze_previous") {
+      scene.initFreezePreviousStages = true;
+    } else if (key == "init_keep_previous_active") {
+      scene.initFreezePreviousStages = false;
     } else if (key == "init_ring_vertices") {
       scene.initRingVertexCount = std::max(3, std::stoi(parts[1]));
     } else if (key == "init_stack_axis_mode") {
@@ -112,6 +120,10 @@ namespace modules {
       scene.initRingRadiusNm = stod(parts[1]);
     } else if (key == "init_ring_spacing_nm") {
       scene.initRingSpacingNm = stod(parts[1]);
+    } else if (key == "init_stage_clearance") {
+      scene.initStageClearance = stod(parts[1]);
+    } else if (key == "init_stage_clearance_nm") {
+      scene.initStageClearanceNm = stod(parts[1]);
     } else if (key == "ring_insertion") {
       scene.ringInsertionEnabled = true;
     } else if (key == "ring_insertion_every") {

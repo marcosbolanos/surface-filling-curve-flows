@@ -38,7 +38,10 @@ namespace modules {
     double rminNm = 0;
     double nanometersPerUnit = 1;
     double w_bilaplacian = 0;
+    std::string initMode = "rings";
     int initTriangleCount = 1;
+    int initStageIterations = 100;
+    bool initFreezePreviousStages = true;
     int initRingVertexCount = 24;
     std::string initStackAxisMode = "long";
     double initStackRotateDeg = 0;
@@ -50,6 +53,8 @@ namespace modules {
     double initRingSpacing = 0;
     double initRingRadiusNm = 0;
     double initRingSpacingNm = 0;
+    double initStageClearance = 0;
+    double initStageClearanceNm = 0;
     bool ringInsertionEnabled = false;
     int ringInsertionEvery = 10;
     int ringInsertionAfterIter = 10;
